@@ -21,8 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdint.h>
+#include <stdio.h>
 #include "stm32f0xx.h"
+#include <lcd_stm32f0.c>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,17 +34,6 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define FALSE 0
-#define TRUE 1
-
-// Definitions for SPI usage
-#define MEM_SIZE 8192 // bytes
-#define WREN 0b00000110 // enable writing
-#define WRDI 0b00000100 // disable writing
-#define RDSR 0b00000101 // read status register
-#define WRSR 0b00000001 // write status register
-#define READ 0b00000011
-#define WRITE 0b00000010
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -52,26 +42,29 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-TIM_HandleTypeDef htim16;
+ADC_HandleTypeDef hadc;
+TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
-// TODO: Define any input variables
-static uint8_t patterns[] = {0b10101010, 0b01010101, 0b11001100, 0b00110011, 0b11110000, 0b00001111};
-static uint16_t address[] = {0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005};
-static uint8_t index = 0;
+uint32_t prev_millis = 0;
+uint32_t curr_millis = 0;
+uint32_t delay_t = 500; // Initialise delay to 500ms
+uint32_t adc_val;
+uint16_t timeStamp = 0; // Initialise timeStamp for debouncing
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_TIM16_Init(void);
+static void MX_ADC_Init(void);
+static void MX_TIM3_Init(void);
+
 /* USER CODE BEGIN PFP */
 void EXTI0_1_IRQHandler(void);
-void TIM16_IRQHandler(void);
-static void init_spi(void);
-static void write_to_address(uint16_t address, uint8_t data);
-static uint8_t read_from_address(uint16_t address);
-static void delay(uint32_t delay_in_us);
+void writeLCD(char *char_in);
+uint32_t pollADC(void);
+uint32_t ADCtoCCR(uint32_t adc_val);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -100,62 +93,45 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  init_spi();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_TIM16_Init();
+  MX_ADC_Init();
+  MX_TIM3_Init();
+
   /* USER CODE BEGIN 2 */
+  init_LCD();
 
-  // TODO: Start timer TIM16
-  HAL_TIM_Base_Start_IT(&htim16); //  start the TIM16 process in interrupt (IT) mode (p476)
-
-  // TODO: Write all "patterns" to EEPROM using SPI
-
-  for(int i = 0; i < sizeof(patterns)/sizeof(patterns[0]); i++)
-  {
-	  write_to_address(address[i], patterns[i]);
-  }
-
-  if (!GPIO_IDR_0)
-  {
-	 HAL_TIM_Base_Stop(&htim16); // Stop the timer
-	 htim16.Instance->ARR = 2999; // Update ARR value
-	 HAL_TIM_Base_Start(&htim16); // Restart the timer
-
-		// Pclk = 48MHz
-  }
+  // PWM setup
+  uint32_t CCR = 0;
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3); // Start PWM on TIM3 Channel 3
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	// Toggle LED0
+	HAL_GPIO_TogglePin(GPIOB, LED7_Pin);
+
+	// ADC to LCD; TODO: Read POT1 value and write to LCD
+
+	adc_val = pollADC();
+	char string_val[4];
+
+	sprintf(string_val, "%lu", adc_val);
+	writeLCD(string_val);
+
+	// Update PWM value; TODO: Get CRR
+	CCR = ADCtoCCR(adc_val);
+	__HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_3, CCR);
+
+	// Wait for delay ms
+	HAL_Delay (delay_t);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-	// TODO: Check button PA0; if pressed, change timer delay
-
-	 uint16_t data = (GPIOA -> IDR) & 0x0000000F; //bitmask used to esnure all floating pins are represented as low
-	 int PA0_pressed = ((data & GPIO_IDR_0)==0); //if IDR bit 0 value is 0, PA0_pressed = 1
-
-	 if (PA0_pressed)
-	  {
-		 if (htim16.Instance->ARR == 999)
-		 {
-			 HAL_TIM_Base_Stop(&htim16); // Stop the timer
-			 htim16.Instance->ARR = 499; // Update ARR value
-			 HAL_TIM_Base_Start(&htim16); // Restart the timer
-		 }
-		 else
-		 {
-			 HAL_TIM_Base_Stop(&htim16); // Stop the timer
-			 htim16.Instance->ARR = 999; // Update ARR value
-			 HAL_TIM_Base_Start(&htim16); // Restart the timer
-		 }
-	  }
   }
   /* USER CODE END 3 */
 }
@@ -178,6 +154,14 @@ void SystemClock_Config(void)
 
   }
   LL_RCC_HSI_SetCalibTrimming(16);
+  LL_RCC_HSI14_Enable();
+
+   /* Wait till HSI14 is ready */
+  while(LL_RCC_HSI14_IsReady() != 1)
+  {
+
+  }
+  LL_RCC_HSI14_SetCalibTrimming(16);
   LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
   LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
   LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_HSI);
@@ -194,37 +178,121 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+  LL_RCC_HSI14_EnableADCControl();
 }
 
 /**
-  * @brief TIM16 Initialization Function
+  * @brief ADC Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM16_Init(void)
+static void MX_ADC_Init(void)
 {
 
-  /* USER CODE BEGIN TIM16_Init 0 */
+  /* USER CODE BEGIN ADC_Init 0 */
+  /* USER CODE END ADC_Init 0 */
 
-  /* USER CODE END TIM16_Init 0 */
+  ADC_ChannelConfTypeDef sConfig = {0};
 
-  /* USER CODE BEGIN TIM16_Init 1 */
+  /* USER CODE BEGIN ADC_Init 1 */
 
-  /* USER CODE END TIM16_Init 1 */
-  htim16.Instance = TIM16;
-  htim16.Init.Prescaler = 8000-1;
-  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim16.Init.Period = 1000-1;
-  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim16.Init.RepetitionCounter = 0;
-  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
+  /* USER CODE END ADC_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc.Instance = ADC1;
+  hadc.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
+  hadc.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc.Init.ScanConvMode = ADC_SCAN_DIRECTION_FORWARD;
+  hadc.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc.Init.LowPowerAutoWait = DISABLE;
+  hadc.Init.LowPowerAutoPowerOff = DISABLE;
+  hadc.Init.ContinuousConvMode = DISABLE;
+  hadc.Init.DiscontinuousConvMode = DISABLE;
+  hadc.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc.Init.DMAContinuousRequests = DISABLE;
+  hadc.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  if (HAL_ADC_Init(&hadc) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM16_Init 2 */
-  NVIC_EnableIRQ(TIM16_IRQn);
-  /* USER CODE END TIM16_Init 2 */
+
+  /** Configure for the selected ADC regular channel to be converted.
+  */
+  sConfig.Channel = ADC_CHANNEL_6;
+  sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
+  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC_Init 2 */
+  ADC1->CR |= ADC_CR_ADCAL;
+  while(ADC1->CR & ADC_CR_ADCAL);			// Calibrate the ADC
+  ADC1->CR |= (1 << 0);						// Enable ADC
+  while((ADC1->ISR & (1 << 0)) == 0);		// Wait for ADC ready
+  /* USER CODE END ADC_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 0;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 47999;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
 
 }
 
@@ -246,27 +314,6 @@ static void MX_GPIO_Init(void)
   LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOB);
 
   /**/
-  LL_GPIO_ResetOutputPin(LED0_GPIO_Port, LED0_Pin);
-
-  /**/
-  LL_GPIO_ResetOutputPin(LED1_GPIO_Port, LED1_Pin);
-
-  /**/
-  LL_GPIO_ResetOutputPin(LED2_GPIO_Port, LED2_Pin);
-
-  /**/
-  LL_GPIO_ResetOutputPin(LED3_GPIO_Port, LED3_Pin);
-
-  /**/
-  LL_GPIO_ResetOutputPin(LED4_GPIO_Port, LED4_Pin);
-
-  /**/
-  LL_GPIO_ResetOutputPin(LED5_GPIO_Port, LED5_Pin);
-
-  /**/
-  LL_GPIO_ResetOutputPin(LED6_GPIO_Port, LED6_Pin);
-
-  /**/
   LL_GPIO_ResetOutputPin(LED7_GPIO_Port, LED7_Pin);
 
   /**/
@@ -286,62 +333,6 @@ static void MX_GPIO_Init(void)
   LL_EXTI_Init(&EXTI_InitStruct);
 
   /**/
-  GPIO_InitStruct.Pin = LED0_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(LED0_GPIO_Port, &GPIO_InitStruct);
-
-  /**/
-  GPIO_InitStruct.Pin = LED1_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(LED1_GPIO_Port, &GPIO_InitStruct);
-
-  /**/
-  GPIO_InitStruct.Pin = LED2_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(LED2_GPIO_Port, &GPIO_InitStruct);
-
-  /**/
-  GPIO_InitStruct.Pin = LED3_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(LED3_GPIO_Port, &GPIO_InitStruct);
-
-  /**/
-  GPIO_InitStruct.Pin = LED4_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(LED4_GPIO_Port, &GPIO_InitStruct);
-
-  /**/
-  GPIO_InitStruct.Pin = LED5_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(LED5_GPIO_Port, &GPIO_InitStruct);
-
-  /**/
-  GPIO_InitStruct.Pin = LED6_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(LED6_GPIO_Port, &GPIO_InitStruct);
-
-  /**/
   GPIO_InitStruct.Pin = LED7_Pin;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
@@ -350,135 +341,63 @@ static void MX_GPIO_Init(void)
   LL_GPIO_Init(LED7_GPIO_Port, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
+  HAL_NVIC_SetPriority(EXTI0_1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_1_IRQn);
 /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-
-// Initialise SPI
-static void init_spi(void) {
-
-  // Clock to PB
-  RCC->AHBENR |= RCC_AHBENR_GPIOBEN; 	// Enable clock for SPI port
-
-  // Set pin modes
-  GPIOB->MODER |= GPIO_MODER_MODER13_1; // Set pin SCK (PB13) to Alternate Function
-  GPIOB->MODER |= GPIO_MODER_MODER14_1; // Set pin MISO (PB14) to Alternate Function
-  GPIOB->MODER |= GPIO_MODER_MODER15_1; // Set pin MOSI (PB15) to Alternate Function
-  GPIOB->MODER |= GPIO_MODER_MODER12_0; // Set pin CS (PB12) to output push-pull
-  GPIOB->BSRR |= GPIO_BSRR_BS_12; 		// Pull CS high
-
-  // Clock enable to SPI
-  RCC->APB1ENR |= RCC_APB1ENR_SPI2EN;
-  SPI2->CR1 |= SPI_CR1_BIDIOE; 									// Enable output
-  SPI2->CR1 |= (SPI_CR1_BR_0 |  SPI_CR1_BR_1); 					// Set Baud to fpclk / 16
-  SPI2->CR1 |= SPI_CR1_MSTR; 									// Set to master mode
-  SPI2->CR2 |= SPI_CR2_FRXTH; 									// Set RX threshold to be 8 bits
-  SPI2->CR2 |= SPI_CR2_SSOE; 									// Enable slave output to work in master mode
-  SPI2->CR2 |= (SPI_CR2_DS_0 | SPI_CR2_DS_1 | SPI_CR2_DS_2); 	// Set to 8-bit mode
-  SPI2->CR1 |= SPI_CR1_SPE; 									// Enable the SPI peripheral
-}
-
-// Implements a delay in microseconds
-static void delay(uint32_t delay_in_us) {
-  volatile uint32_t counter = 0;
-  delay_in_us *= 3;
-  for(; counter < delay_in_us; counter++) {
-    __asm("nop");
-    __asm("nop");
-  }
-}
-
-// Write to EEPROM address using SPI
-static void write_to_address(uint16_t address, uint8_t data) {
-
-	uint8_t dummy; // Junk from the DR
-
-	// Set the Write Enable latch
-	GPIOB->BSRR |= GPIO_BSRR_BR_12; // Pull CS low
-	delay(1);
-	*((uint8_t*)(&SPI2->DR)) = WREN;
-	while ((SPI2->SR & SPI_SR_RXNE) == 0); // Hang while RX is empty
-	dummy = SPI2->DR;
-	GPIOB->BSRR |= GPIO_BSRR_BS_12; // Pull CS high
-	delay(5000);
-
-	// Send write instruction
-	GPIOB->BSRR |= GPIO_BSRR_BR_12; 			// Pull CS low
-	delay(1);
-	*((uint8_t*)(&SPI2->DR)) = WRITE;
-	while ((SPI2->SR & SPI_SR_RXNE) == 0); 		// Hang while RX is empty
-	dummy = SPI2->DR;
-
-	// Send 16-bit address
-	*((uint8_t*)(&SPI2->DR)) = (address >> 8); 	// Address MSB
-	while ((SPI2->SR & SPI_SR_RXNE) == 0); 		// Hang while RX is empty
-	dummy = SPI2->DR;
-	*((uint8_t*)(&SPI2->DR)) = (address); 		// Address LSB
-	while ((SPI2->SR & SPI_SR_RXNE) == 0); 		// Hang while RX is empty
-	dummy = SPI2->DR;
-
-	// Send the data
-	*((uint8_t*)(&SPI2->DR)) = data;
-	while ((SPI2->SR & SPI_SR_RXNE) == 0); // Hang while RX is empty
-	dummy = SPI2->DR;
-	GPIOB->BSRR |= GPIO_BSRR_BS_12; // Pull CS high
-	delay(5000);
-}
-
-// Read from EEPROM address using SPI
-static uint8_t read_from_address(uint16_t address) {
-
-	uint8_t dummy; // Junk from the DR
-
-	// Send the read instruction
-	GPIOB->BSRR |= GPIO_BSRR_BR_12; 			// Pull CS low
-	delay(1);
-	*((uint8_t*)(&SPI2->DR)) = READ;
-	while ((SPI2->SR & SPI_SR_RXNE) == 0); 		// Hang while RX is empty
-	dummy = SPI2->DR;
-
-	// Send 16-bit address
-	*((uint8_t*)(&SPI2->DR)) = (address >> 8); 	// Address MSB
-	while ((SPI2->SR & SPI_SR_RXNE) == 0);		// Hang while RX is empty
-	dummy = SPI2->DR;
-	*((uint8_t*)(&SPI2->DR)) = (address); 		// Address LSB
-	while ((SPI2->SR & SPI_SR_RXNE) == 0); 		// Hang while RX is empty
-	dummy = SPI2->DR;
-
-	// Clock in the data
-	*((uint8_t*)(&SPI2->DR)) = 0x42; 			    // Clock out some junk data
-	while ((SPI2->SR & SPI_SR_RXNE) == 0); 		// Hang while RX is empty
-	dummy = SPI2->DR;
-	GPIOB->BSRR |= GPIO_BSRR_BS_12; 			    // Pull CS high
-	delay(5000);
-
-	return dummy;								              // Return read data
-}
-
-// Timer rolled over
-void TIM16_IRQHandler(void)
+void EXTI0_1_IRQHandler(void)
 {
-	// Acknowledge interrupt
-	HAL_TIM_IRQHandler(&htim16);
-
-	// TODO: Change to next LED pattern; output 0x01 if the read SPI data is incorrect
-	if (index >= sizeof(address)/sizeof(address[0]))
+	// TODO: Add code to switch LED7 delay frequency
+	if (HAL_GetTick() >= timeStamp) // Debouncing
 	{
-		index = 0; // If cycled through all addresses, reverts to first address
+		if (delay_t == 500)
+		{
+			delay_t = 250; // Result in 2 Hz frequency
+			timeStamp = HAL_GetTick() + 500;
+		}
+		else
+		{
+			delay_t = 500; // Results in 1Hz frequency
+			timeStamp = HAL_GetTick() + 500;
+		}
 	}
-	uint8_t bit_pattern = read_from_address(address[index]);
-	if (bit_pattern == patterns[index]) // Fail safe
-	{
-		GPIOB -> ODR = bit_pattern; //display bit pattern
-	}
-	else
-	{
-		GPIOB -> ODR = 0b00000001; //SPI failure
-	}
-	index++;
+	HAL_GPIO_EXTI_IRQHandler(Button0_Pin); // Clear interrupt flags
 }
 
+// TODO: Complete the writeLCD function
+void writeLCD(char *char_in){
+    delay(3000);
+    lcd_command(CLEAR);
+    lcd_putstring(char_in); // Write ADC value to LDC
+}
+
+// Get ADC value
+uint32_t pollADC(void){
+  // TODO: Complete function body to get ADC val
+	HAL_ADC_Start(&hadc);
+	while(HAL_ADC_PollForConversion(&hadc, HAL_MAX_DELAY) != HAL_OK) // Poll for ADC value. Wait is indefinite
+	{
+
+	}
+	uint32_t val = HAL_ADC_GetValue(&hadc); // read ADC value
+	HAL_ADC_Stop(&hadc);
+	return val;
+}
+
+// Calculate PWM CCR value
+uint32_t ADCtoCCR(uint32_t adc_val){
+  // TODO: Calculate CCR val using an appropriate equation
+	uint32_t val = (47999/4095)*adc_val; // Duty Cylce will range betwen 0 and 100% depending on ADC value
+	return val;
+}
+
+void ADC1_COMP_IRQHandler(void)
+{
+	adc_val = HAL_ADC_GetValue(&hadc); // read adc value
+	HAL_ADC_IRQHandler(&hadc); //Clear flags
+}
 /* USER CODE END 4 */
 
 /**
